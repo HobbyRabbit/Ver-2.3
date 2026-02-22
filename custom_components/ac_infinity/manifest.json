@@ -3,6 +3,6 @@
   "name": "AC Infinity",
   "version": "2.0.0",
   "config_flow": true,
-  "requirements": []
+  "requirements": [],
   "iot_class": "local_polling"
 }
