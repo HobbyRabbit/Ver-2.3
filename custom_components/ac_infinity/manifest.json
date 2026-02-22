@@ -1,12 +1,8 @@
 {
   "domain": "ac_infinity",
-  "name": "AC Infinity 69 Pro",
-  "version": "0.1.0",
-  "documentation": "https://github.com/hunterjm/ac-infinity-hacs",
-  "dependencies": ["bluetooth"],
-  "requirements": ["bleak>=0.21.3"],
-  "codeowners": ["@V2.2"],
-  "config_flow": false,
-  "iot_class": "local_push",
-  "homeassistant": "2023.10.0"
+  "name": "AC Infinity",
+  "version": "2.0.0",
+  "config_flow": true,
+  "requirements": [],
+  "iot_class": "local_polling"
 }
