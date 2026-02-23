@@ -1,69 +1,136 @@
-import asyncio 
+"""AC Infinity BLE coordinator (dynamic GATT discovery, hunterjm style)."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import timedelta
+
 from bleak import BleakClient
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-WRITE_UUID = "0000fff3-0000-1000-8000-00805f9b34fb"  # Hunter uses this
+_LOGGER = logging.getLogger(__name__)
+
+UPDATE_INTERVAL = timedelta(seconds=30)
 
 
-class ACInfinityCoordinator:
-    def __init__(self, hass, mac: str):
-        self.hass = hass
-        self.mac = mac
+class ACInfinityCoordinator(DataUpdateCoordinator):
+    """Handle BLE connection and commands."""
+
+    def __init__(self, hass, address: str, name: str):
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=name,
+            update_interval=UPDATE_INTERVAL,
+        )
+
+        self.address = address
         self.client: BleakClient | None = None
+        self.write_uuid: str | None = None
+        self.notify_uuid: str | None = None
+        self._services_printed = False
 
-        self.ports = {i: False for i in range(1, 9)}
+    # ---------------------------------------------------------
+    # CONNECTION
+    # ---------------------------------------------------------
 
-    # --------------------------------------------------
-    # BLE CONNECT
-    # --------------------------------------------------
+    async def _connect(self):
+        """Connect to BLE device."""
+        if self.client and self.client.is_connected:
+            return
 
-    async def async_setup(self):
-        self.client = BleakClient(self.mac)
+        _LOGGER.info("Connecting to AC Infinity %s", self.address)
+
+        self.client = BleakClient(self.address, timeout=20)
         await self.client.connect()
 
-    # --------------------------------------------------
-    # HUNTER PACKET FORMAT
-    # --------------------------------------------------
+        await self._discover_characteristics()
 
-    def _build_packet(self, port: int, value: int) -> bytearray:
-        """
-        HunterJM compatible command
+    async def _disconnect(self):
+        if self.client and self.client.is_connected:
+            await self.client.disconnect()
 
-        header  : AA 55
-        length  : 05
-        cmd     : 02 (set port)
-        port    : 01-08
-        value   : 0/1 (off/on)
-        crc     : sum & 0xFF
-        """
+    # ---------------------------------------------------------
+    # SERVICE DISCOVERY  (IMPORTANT PART)
+    # ---------------------------------------------------------
 
-        payload = bytearray([
-            0xAA,
-            0x55,
-            0x05,
-            0x02,
-            port,
-            value,
-        ])
+    async def _discover_characteristics(self):
+        """Auto find write + notify characteristics."""
+        services = await self.client.get_services()
 
-        crc = sum(payload) & 0xFF
-        payload.append(crc)
+        for service in services:
+            for char in service.characteristics:
+                props = char.properties
 
-        return payload
+                if not self._services_printed:
+                    _LOGGER.debug(
+                        "SERVICE %s | CHAR %s | %s",
+                        service.uuid,
+                        char.uuid,
+                        props,
+                    )
 
-    # --------------------------------------------------
-    # PORT CONTROL
-    # --------------------------------------------------
+                if (
+                    not self.write_uuid
+                    and ("write" in props or "write-without-response" in props)
+                ):
+                    self.write_uuid = char.uuid
 
-    async def set_port(self, port: int, state: bool):
-        value = 1 if state else 0
+                if not self.notify_uuid and "notify" in props:
+                    self.notify_uuid = char.uuid
 
-        packet = self._build_packet(port, value)
+        self._services_printed = True
 
-        print(f"SEND → {packet.hex(' ')}")
+        if not self.write_uuid:
+            raise RuntimeError("No writable characteristic found")
 
-        await self.client.write_gatt_char(WRITE_UUID, packet)
+        _LOGGER.info("Using write UUID: %s", self.write_uuid)
+        if self.notify_uuid:
+            _LOGGER.info("Using notify UUID: %s", self.notify_uuid)
 
-        self.ports[port] = state
+    # ---------------------------------------------------------
+    # PACKET SEND
+    # ---------------------------------------------------------
 
-    def get_port(self, port: int):
-        return self.ports.get(port, False)
+    async def _send(self, payload: bytes):
+        """Write raw packet to device."""
+        await self._connect()
+
+        _LOGGER.debug("TX → %s", payload.hex())
+
+        await self.client.write_gatt_char(
+            self.write_uuid,
+            payload,
+            response=False,
+        )
+
+    # ---------------------------------------------------------
+    # SIMPLE CONTROLS (START HERE)
+    # ---------------------------------------------------------
+
+    async def async_turn_on(self, port: int = 1):
+        """Turn outlet ON."""
+        # simple hunterjm style packet template
+        packet = bytearray([0xAA, 0x01, port, 0x01])
+        await self._send(packet)
+
+    async def async_turn_off(self, port: int = 1):
+        """Turn outlet OFF."""
+        packet = bytearray([0xAA, 0x01, port, 0x00])
+        await self._send(packet)
+
+    async def async_toggle(self, port: int = 1):
+        """Toggle outlet."""
+        # simple brute test toggle
+        packet = bytearray([0xAA, 0x02, port])
+        await self._send(packet)
+
+    # ---------------------------------------------------------
+    # HA UPDATE LOOP
+    # ---------------------------------------------------------
+
+    async def _async_update_data(self):
+        """Keep connection alive."""
+        await self._connect()
+        return {"connected": self.client.is_connected}
