@@ -1,12 +1,10 @@
-"""AC Infinity BLE coordinator (dynamic GATT discovery, hunterjm style)."""
-
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import timedelta
 
-from bleak import BleakClient
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -15,122 +13,60 @@ UPDATE_INTERVAL = timedelta(seconds=30)
 
 
 class ACInfinityCoordinator(DataUpdateCoordinator):
-    """Handle BLE connection and commands."""
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        mac: str,
+        name: str | None = None,
+    ) -> None:
+        """Initialize AC Infinity coordinator."""
+        self.hass = hass
+        self.mac = mac.upper()
+        self.name = name or f"AC Infinity {self.mac}"
 
-    def __init__(self, hass, address: str, name: str):
+        # Placeholder state
+        self.data = {
+            "online": False,
+            "ports": {
+                1: False,
+                2: False,
+                3: False,
+                4: False,
+                5: False,
+                6: False,
+                7: False,
+                8: False,
+            },
+        }
+
         super().__init__(
             hass,
             _LOGGER,
-            name=name,
+            name=self.name,
             update_interval=UPDATE_INTERVAL,
         )
 
-        self.address = address
-        self.client: BleakClient | None = None
-        self.write_uuid: str | None = None
-        self.notify_uuid: str | None = None
-        self._services_printed = False
+    async def _async_update_data(self):
+        """Fetch data from the device (stub for now)."""
+        _LOGGER.debug("Polling AC Infinity device %s", self.mac)
 
-    # ---------------------------------------------------------
-    # CONNECTION
-    # ---------------------------------------------------------
+        # Until BLE read is implemented, just report online
+        self.data["online"] = True
 
-    async def _connect(self):
-        """Connect to BLE device."""
-        if self.client and self.client.is_connected:
-            return
+        return self.data
 
-        _LOGGER.info("Connecting to AC Infinity %s", self.address)
+    async def async_set_port(self, port: int, state: bool) -> None:
+        """Set outlet/port ON or OFF."""
+        if port not in self.data["ports"]:
+            raise ValueError(f"Invalid port: {port}")
 
-        self.client = BleakClient(self.address, timeout=20)
-        await self.client.connect()
-
-        await self._discover_characteristics()
-
-    async def _disconnect(self):
-        if self.client and self.client.is_connected:
-            await self.client.disconnect()
-
-    # ---------------------------------------------------------
-    # SERVICE DISCOVERY  (IMPORTANT PART)
-    # ---------------------------------------------------------
-
-    async def _discover_characteristics(self):
-        """Auto find write + notify characteristics."""
-        services = await self.client.get_services()
-
-        for service in services:
-            for char in service.characteristics:
-                props = char.properties
-
-                if not self._services_printed:
-                    _LOGGER.debug(
-                        "SERVICE %s | CHAR %s | %s",
-                        service.uuid,
-                        char.uuid,
-                        props,
-                    )
-
-                if (
-                    not self.write_uuid
-                    and ("write" in props or "write-without-response" in props)
-                ):
-                    self.write_uuid = char.uuid
-
-                if not self.notify_uuid and "notify" in props:
-                    self.notify_uuid = char.uuid
-
-        self._services_printed = True
-
-        if not self.write_uuid:
-            raise RuntimeError("No writable characteristic found")
-
-        _LOGGER.info("Using write UUID: %s", self.write_uuid)
-        if self.notify_uuid:
-            _LOGGER.info("Using notify UUID: %s", self.notify_uuid)
-
-    # ---------------------------------------------------------
-    # PACKET SEND
-    # ---------------------------------------------------------
-
-    async def _send(self, payload: bytes):
-        """Write raw packet to device."""
-        await self._connect()
-
-        _LOGGER.debug("TX → %s", payload.hex())
-
-        await self.client.write_gatt_char(
-            self.write_uuid,
-            payload,
-            response=False,
+        _LOGGER.debug(
+            "Setting AC Infinity %s port %s -> %s",
+            self.mac,
+            port,
+            state,
         )
 
-    # ---------------------------------------------------------
-    # SIMPLE CONTROLS (START HERE)
-    # ---------------------------------------------------------
-
-    async def async_turn_on(self, port: int = 1):
-        """Turn outlet ON."""
-        # simple hunterjm style packet template
-        packet = bytearray([0xAA, 0x01, port, 0x01])
-        await self._send(packet)
-
-    async def async_turn_off(self, port: int = 1):
-        """Turn outlet OFF."""
-        packet = bytearray([0xAA, 0x01, port, 0x00])
-        await self._send(packet)
-
-    async def async_toggle(self, port: int = 1):
-        """Toggle outlet."""
-        # simple brute test toggle
-        packet = bytearray([0xAA, 0x02, port])
-        await self._send(packet)
-
-    # ---------------------------------------------------------
-    # HA UPDATE LOOP
-    # ---------------------------------------------------------
-
-    async def _async_update_data(self):
-        """Keep connection alive."""
-        await self._connect()
-        return {"connected": self.client.is_connected}
+        # TODO: Insert HunterJM BLE write here
+        self.data["ports"][port] = state
+        self.async_set_updated_data(self.data)
